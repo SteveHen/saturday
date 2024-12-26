@@ -1,123 +1,150 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"os"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "os"
+    "strconv"
 
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+    "github.com/spf13/cobra"
 )
 
-// WeatherResponse represents the structure of the weather API response
-type WeatherResponse struct {
-	Name string `json:"name"`
-	Main struct {
-		Temp float64 `json:"temp"`
-	} `json:"main"`
-	Weather []struct {
-		Description string `json:"description"`
-	} `json:"weather"`
+var city string
+
+func init() {
+    rootCmd.PersistentFlags().StringVarP(&city, "city", "c", "", "Name der Stadt für die Wetterabfrage")
+    rootCmd.MarkPersistentFlagRequired("city")
 }
 
-func fetchWeather(city string) (WeatherResponse, error) {
-	// Beispiel: Feste Koordinaten für Berlin
-	latitude := "52.5200"
-	longitude := "13.4050"
+var rootCmd = &cobra.Command{
+    Use:   "app",
+    Short: "Eine Anwendung zur Wetterabfrage",
+    Run: func(cmd *cobra.Command, args []string) {
+        lat, lon, err := getCoordinates(city)
+        if err != nil {
+            fmt.Printf("Error fetching coordinates: %v\n", err)
+            os.Exit(1)
+        }
 
-	var weatherData struct {
-		CurrentWeather struct {
-			Temperature float64 `json:"temperature"`
-			WeatherCode int     `json:"weathercode"`
-		} `json:"current_weather"`
-	}
+        weatherData, err := fetchWeather(lat, lon)
+        if err != nil {
+            fmt.Printf("Error fetching weather: %v\n", err)
+            os.Exit(1)
+        }
 
-	url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=true", latitude, longitude)
-	resp, err := http.Get(url)
-	if err != nil {
-		return WeatherResponse{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return WeatherResponse{}, fmt.Errorf("failed to fetch weather data: %s", resp.Status)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&weatherData)
-	if err != nil {
-		return WeatherResponse{}, err
-	}
-
-	return WeatherResponse{
-		Name: "Berlin",
-		Main: struct {
-			Temp float64 `json:"temp"`
-		}{
-			Temp: weatherData.CurrentWeather.Temperature,
-		},
-		Weather: []struct {
-			Description string `json:"description"`
-		}{
-			{Description: fmt.Sprintf("Code %d", weatherData.CurrentWeather.WeatherCode)},
-		},
-	}, nil
+        fmt.Printf("Current weather in %s:\n", weatherData.Name)
+        fmt.Printf("Temperature: %.2f°C\n", weatherData.Main.Temp)
+        if len(weatherData.Weather) > 0 {
+            fmt.Printf("Description: %s\n", weatherData.Weather[0].Description)
+        }
+    },
 }
 
 func main() {
-	var rootCmd = &cobra.Command{
-		Use:   "weathercli",
-		Short: "Weather CLI tool",
-		Long:  "A simple CLI tool to fetch and display the current weather using OpenWeatherMap API.",
-	}
+    if err := rootCmd.Execute(); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+}
 
-	var printCmd = &cobra.Command{
-		Use:   "print",
-		Short: "Print the current weather",
-		Run: func(cmd *cobra.Command, args []string) {
-			city := viper.GetString("city")
-			apiKey := viper.GetString("apikey")
+func getCoordinates(city string) (float64, float64, error) {
+    url := fmt.Sprintf("https://nominatim.openstreetmap.org/search?q=%s&format=json&limit=1", city)
 
-			if apiKey == "" {
-				fmt.Println("Error: API key is required. Set it in the config file or pass it as an environment variable.")
-				os.Exit(1)
-			}
+    resp, err := http.Get(url)
+    if err != nil {
+        return 0, 0, err
+    }
+    defer resp.Body.Close()
 
-			if city == "" {
-				fmt.Println("Error: City is required. Set it in the config file or pass it as an argument.")
-				os.Exit(1)
-			}
+    var result []struct {
+        Lat string `json:"lat"`
+        Lon string `json:"lon"`
+    }
 
-			weatherData, err := fetchWeather(city)
-			if err != nil {
-				fmt.Printf("Error fetching weather: %v\n", err)
-				os.Exit(1)
-			}
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return 0, 0, err
+    }
 
-			fmt.Printf("Current weather in %s:\n", weatherData.Name)
-			fmt.Printf("Temperature: %.2f°C\n", weatherData.Main.Temp)
-			if len(weatherData.Weather) > 0 {
-				fmt.Printf("Description: %s\n", weatherData.Weather[0].Description)
-			}
-		},
-	}
+    if len(result) == 0 {
+        return 0, 0, fmt.Errorf("no coordinates found for city: %s", city)
+    }
 
-	rootCmd.AddCommand(printCmd)
+    lat, err := strconv.ParseFloat(result[0].Lat, 64)
+    if err != nil {
+        return 0, 0, err
+    }
 
-	// Use Viper for configuration
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
+    lon, err := strconv.ParseFloat(result[0].Lon, 64)
+    if err != nil {
+        return 0, 0, err
+    }
 
-	// Set default values
-	viper.SetDefault("city", "Berlin")
+    return lat, lon, nil
+}
 
-	if err := viper.ReadInConfig(); err != nil {
-		fmt.Println("Warning: No configuration file found. Using defaults.")
-	}
+func fetchWeather(lat, lon float64) (WeatherData, error) {
+    url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%f&longitude=%f&current_weather=true", lat, lon)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+    resp, err := http.Get(url)
+    if err != nil {
+        return WeatherData{}, err
+    }
+    defer resp.Body.Close()
+
+    var weatherData struct {
+        CurrentWeather struct {
+            Temperature float64 `json:"temperature"`
+            Weathercode int     `json:"weathercode"`
+        } `json:"current_weather"`
+    }
+
+    if err := json.NewDecoder(resp.Body).Decode(&weatherData); err != nil {
+        return WeatherData{}, err
+    }
+
+    return WeatherData{
+        Name: city,
+        Main: MainData{Temp: weatherData.CurrentWeather.Temperature},
+        Weather: []WeatherDescription{
+            {Description: getWeatherDescription(weatherData.CurrentWeather.Weathercode)},
+        },
+    }, nil
+}
+
+func getWeatherDescription(code int) string {
+    switch code {
+    case 0:
+        return "clear sky"
+    case 1, 2, 3:
+        return "partly cloudy"
+    case 45, 48:
+        return "fog"
+    case 51, 53, 55:
+        return "drizzle"
+    case 61, 63, 65:
+        return "rain"
+    case 71, 73, 75:
+        return "snow"
+    case 80, 81, 82:
+        return "rain showers"
+    case 95, 96, 99:
+        return "thunderstorm"
+    default:
+        return "unknown"
+    }
+}
+
+type WeatherData struct {
+    Name    string
+    Main    MainData
+    Weather []WeatherDescription
+}
+
+type MainData struct {
+    Temp float64
+}
+
+type WeatherDescription struct {
+    Description string
 }
